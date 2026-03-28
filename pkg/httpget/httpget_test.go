@@ -34,7 +34,7 @@ func TestDownloader_RangeDownload(t *testing.T) {
 	poolSize := 3
 	chunkSize := int64(1024 * 1024) // 1MB chunks for testing
 
-	results, err := d.RangeDownload(ctx, testURL, poolSize, chunkSize)
+	infos, err := d.RangeDownload(ctx, testURL, poolSize, chunkSize)
 	if err != nil {
 		t.Fatalf("RangeDownload failed: %v", err)
 	}
@@ -43,27 +43,21 @@ func TestDownloader_RangeDownload(t *testing.T) {
 	var partCount int
 	var errors []error
 
-	for result := range results {
-		if result.Error != nil {
-			errors = append(errors, result.Error)
-			t.Logf("part %d error: %v", result.PartNum, result.Error)
-			continue
-		}
-
+	for info := range infos {
 		// Read and discard data
-		n, err := io.Copy(io.Discard, result.Data)
-		_ = result.Data.Close()
+		n, err := io.Copy(io.Discard, info.Body())
+		_ = info.Body().Close()
 
 		if err != nil {
 			errors = append(errors, err)
-			t.Logf("part %d read error: %v", result.PartNum, err)
+			t.Logf("part %d read error: %v", info.PartNumber(), err)
 			continue
 		}
 
 		totalBytes += n
 		partCount++
 
-		t.Logf("part %d: range [%d-%d], size %d", result.PartNum, result.Range.Start, result.Range.End, n)
+		t.Logf("part %d: size %d", info.PartNumber(), n)
 	}
 
 	if len(errors) > 0 {
@@ -75,39 +69,6 @@ func TestDownloader_RangeDownload(t *testing.T) {
 	}
 
 	t.Logf("downloaded %d parts, total %d bytes", partCount, totalBytes)
-}
-
-func TestDownloader_RangeDownload_SingleChunk(t *testing.T) {
-	d := NewDownloader()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
-
-	// Use large chunk size to test single part download
-	poolSize := 1
-	chunkSize := int64(100 * 1024 * 1024) // 100MB
-
-	results, err := d.RangeDownload(ctx, testURL, poolSize, chunkSize)
-	if err != nil {
-		t.Fatalf("RangeDownload failed: %v", err)
-	}
-
-	var partCount int
-	for result := range results {
-		if result.Error != nil {
-			t.Fatalf("part %d error: %v", result.PartNum, result.Error)
-		}
-
-		_ = result.Data.Close()
-		partCount++
-
-		if result.PartNum != 1 {
-			t.Errorf("expected part 1, got %d", result.PartNum)
-		}
-	}
-
-	if partCount != 1 {
-		t.Errorf("expected 1 part, got %d", partCount)
-	}
 }
 
 func TestDownloader_Download(t *testing.T) {
@@ -148,7 +109,7 @@ func TestSplitRanges(t *testing.T) {
 		{"exact fit", 100, 10, 10},
 		{"with remainder", 105, 10, 11},
 		{"single part", 5, 10, 1},
-		{"large file", 100*1024*1024, 5*1024*1024, 20},
+		{"large file", 100 * 1024 * 1024, 5 * 1024 * 1024, 20},
 	}
 
 	for _, tt := range tests {

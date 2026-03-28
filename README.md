@@ -4,21 +4,21 @@ Download files via HTTP byte-range requests and upload to cloud storage.
 
 ## Design
 
-Decoupled architecture: `httpget` downloads, `storage` uploads, caller coordinates.
+Focused architecture for downloading to cloud storage:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                        Caller                                │
-│  ┌─────────────┐         ┌─────────────┐                   │
-│  │  httpget    │  chan   │   storage   │                   │
-│  │  Download   │ ───────▶│   Upload    │                   │
-│  └─────────────┘         └─────────────┘                   │
+│  httpget.RangeDownload(url, poolSize, chunkSize)            │
+│                     ↓                                       │
+│         <-chan storage.RangeInfo                            │
+│                     ↓                                       │
+│       oss.Upload(objectKey, uploadID, rangeCh)              │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ## httpget
 
-HTTP byte-range downloader.
+HTTP byte-range downloader. Returns `storage.RangeInfo` directly.
 
 ```go
 import "go.zheteng.cloud/downloader/pkg/httpget"
@@ -28,15 +28,11 @@ d := httpget.NewDownloader()
 // Get file size
 size, _ := d.GetFileSize(ctx, url)
 
-// Download with 5 workers, 5MB chunks
-results, _ := d.RangeDownload(ctx, url, 5, 5*1024*1024)
+// Download with 5 workers, 5MB chunks - returns storage.RangeInfo directly!
+rangeCh, _ := d.RangeDownload(ctx, url, 5, 5*1024*1024)
 
-for result := range results {
-    if result.Error != nil {
-        continue
-    }
-    // Use result.PartNum, result.Data
-}
+// Pass rangeCh directly to storage.Upload - no adapter needed
+parts, _ := store.Upload(ctx, objectKey, uploadID, rangeCh, 5)
 ```
 
 ## storage
@@ -77,95 +73,82 @@ store, _ := oss.New(cfg, progressCh)
 // Create multipart upload
 uploadID, _ := store.CreateMultipartUpload(ctx, objectKey)
 
-// Upload from channel with 5 workers
+// Download - returns RangeInfo channel directly
+rangeCh, _ := d.RangeDownload(ctx, url, 5, 5*1024*1024)
+
+// Upload directly from channel - no adapter!
 parts, _ := store.Upload(ctx, objectKey, uploadID, rangeCh, 5)
-
-// Complete
-store.CompleteMultipartUpload(ctx, uploadID, objectKey, parts)
 ```
 
-## Usage Example
+## Aliyun Function Compute
 
-```go
-package main
+Deploy as FC function for serverless file downloading.
 
-import (
-    "context"
-    "io"
-    "go.zheteng.cloud/downloader/pkg/httpget"
-    "go.zheteng.cloud/downloader/pkg/storage"
-    "go.zheteng.cloud/downloader/pkg/storage/oss"
-)
+### Build
 
-// Adapter: httpget.Result -> storage.RangeInfo
-type resultAdapter struct {
-    r httpget.Result
-}
+```bash
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o main ./cmd/multipart/
+zip main.zip main
+```
 
-func (a resultAdapter) PartNumber() int       { return a.r.PartNum }
-func (a resultAdapter) Body() io.ReadCloser   { return a.r.Data }
+### Input Event
 
-func main() {
-    ctx := context.Background()
-    
-    // 1. Create downloader
-    d := httpget.NewDownloader()
-    
-    // 2. Create OSS storage
-    store, _ := oss.New(oss.Config{
-        Region: "cn-hangzhou",
-        // ... credentials
-    }, nil)
-    
-    // 3. Create multipart upload
-    uploadID, _ := store.CreateMultipartUpload(ctx, "file.zip")
-    
-    // 4. Download and bridge to upload channel
-    results, _ := d.RangeDownload(ctx, "https://example.com/file.zip", 5, 5*1024*1024)
-    
-    rangeCh := make(chan storage.RangeInfo, 10)
-    go func() {
-        defer close(rangeCh)
-        for r := range results {
-            if r.Error != nil {
-                continue
-            }
-            rangeCh <- resultAdapter{r}
-        }
-    }()
-    
-    // 5. Upload
-    parts, err := store.Upload(ctx, "file.zip", uploadID, rangeCh, 5)
-    if err != nil {
-        store.AbortMultipartUpload(ctx, uploadID, "file.zip")
-        return
-    }
-    
-    // 6. Complete
-    store.CompleteMultipartUpload(ctx, uploadID, "file.zip", parts)
+```json
+{
+  "url": "https://example.com/file.zip",
+  "bucket": "my-bucket",
+  "objectKey": "downloads/file.zip",
+  "bucketRegion": "cn-hangzhou",
+  "poolSize": 5,
+  "chunkSize": 5242880
 }
 ```
+
+### Output
+
+```json
+{
+  "success": true,
+  "message": "upload completed",
+  "objectKey": "downloads/file.zip",
+  "parts": 10,
+  "bytes": 52428800
+}
+```
+
+### FC Configuration
+
+- **Runtime**: Go 1.x
+- **Handler**: main
+- **Environment Variables**: Uses FC provided credentials
+  - `ALIBABA_CLOUD_ACCESS_KEY_ID`
+  - `ALIBABA_CLOUD_ACCESS_KEY_SECRET`
+  - `ALIBABA_CLOUD_SECURITY_TOKEN` (for STS)
 
 ## File Structure
 
 ```
 .
+├── cmd/
+│   └── multipart/       # Aliyun Function Compute handler
+│       └── main.go
 ├── pkg/
-│   ├── httpget/         # HTTP download only
+│   ├── httpget/         # HTTP download
 │   │   ├── httpget.go
 │   │   └── httpget_test.go
 │   └── storage/         # Storage interface and implementations
 │       ├── storage.go
 │       └── oss/         # Aliyun OSS v2 implementation
 │           ├── oss.go
-│           └── oss_test.go
+│           ├── oss_test.go
+│           └── .env.test
 ├── go.mod
 └── README.md
 ```
 
 ## Design Principles
 
-1. **No coupling**: `httpget` doesn't know about `storage`, `storage` doesn't know about `httpget`
-2. **Interface-based**: `storage.RangeInfo` is the bridge between them
-3. **Caller controls**: Caller creates channel, adapts types, coordinates flow
-4. **Concurrent uploads**: `OSS.Upload()` accepts poolSize for concurrent part uploads
+1. **Single purpose**: This project is for downloading to cloud storage
+2. **Direct flow**: `httpget` returns `storage.RangeInfo` - no conversion needed
+3. **Pipeline**: Channel connects download directly to upload
+4. **Concurrent**: Both download and upload use worker pools

@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"sync"
+
+	"go.zheteng.cloud/downloader/pkg/storage"
 )
 
 // Range represents a byte range for HTTP Range request.
@@ -28,22 +30,7 @@ func (r Range) HeaderValue() string {
 	return fmt.Sprintf("bytes=%d-%d", r.Start, r.End)
 }
 
-// Result represents the result of downloading a range.
-type Result struct {
-	Range   Range
-	PartNum int // 1-based part number
-	Data    io.ReadCloser
-	Error   error
-}
-
-func (res *Result) PartNumber() int {
-	return res.PartNum
-}
-
-func (res *Result) Body() io.ReadCloser {
-	return res.Data
-}
-
+// Downloader downloads files via HTTP byte-range requests.
 type Downloader struct {
 	client *http.Client
 }
@@ -79,10 +66,10 @@ func (d *Downloader) GetFileSize(ctx context.Context, url string) (int64, error)
 
 // RangeDownload downloads a file using byte-range requests concurrently.
 // It splits the file into ranges based on chunkSize and downloads them with a worker pool.
-// Returns a channel of Results that the caller must consume.
-// Each Result's Data must be closed by the consumer.
+// Returns a channel of RangeInfo that the caller must consume.
+// Each RangeInfo's Body must be closed by the consumer.
 // The channel is closed when all ranges are processed.
-func (d *Downloader) RangeDownload(ctx context.Context, url string, poolSize int, chunkSize int64) (<-chan Result, error) {
+func (d *Downloader) RangeDownload(ctx context.Context, url string, poolSize int, chunkSize int64) (<-chan storage.RangeInfo, error) {
 	if poolSize <= 0 {
 		poolSize = 3
 	}
@@ -96,7 +83,7 @@ func (d *Downloader) RangeDownload(ctx context.Context, url string, poolSize int
 	}
 
 	ranges := splitRanges(totalSize, chunkSize)
-	resultCh := make(chan Result, poolSize)
+	resultCh := make(chan storage.RangeInfo, poolSize)
 
 	go func() {
 		defer close(resultCh)
@@ -120,11 +107,16 @@ func (d *Downloader) RangeDownload(ctx context.Context, url string, poolSize int
 					}
 
 					data, err := d.downloadRange(ctx, url, item.r)
-					resultCh <- Result{
-						Range:   item.r,
-						PartNum: item.partNum,
-						Data:    data,
-						Error:   err,
+					if err != nil {
+						// Send error as a special RangeInfo that carries the error
+						resultCh <- &errorRangeInfo{partNum: item.partNum, err: err}
+						continue
+					}
+
+					resultCh <- &rangeInfo{
+						r:       item.r,
+						partNum: item.partNum,
+						data:    data,
 					}
 				}
 			}()
@@ -151,6 +143,32 @@ func (d *Downloader) RangeDownload(ctx context.Context, url string, poolSize int
 
 	return resultCh, nil
 }
+
+// rangeInfo implements storage.RangeInfo
+type rangeInfo struct {
+	r       Range
+	partNum int
+	data    io.ReadCloser
+}
+
+func (ri *rangeInfo) PartNumber() int     { return ri.partNum }
+func (ri *rangeInfo) Body() io.ReadCloser { return ri.data }
+
+// errorRangeInfo carries an error through the channel
+type errorRangeInfo struct {
+	partNum int
+	err     error
+}
+
+func (eri *errorRangeInfo) PartNumber() int     { return eri.partNum }
+func (eri *errorRangeInfo) Body() io.ReadCloser { return &errorReadCloser{err: eri.err} }
+
+type errorReadCloser struct {
+	err error
+}
+
+func (erc *errorReadCloser) Read(p []byte) (int, error) { return 0, erc.err }
+func (erc *errorReadCloser) Close() error               { return nil }
 
 // Download downloads the entire file (no range request).
 // Returns a ReadCloser that must be closed by the caller.
@@ -193,6 +211,11 @@ func (d *Downloader) downloadRange(ctx context.Context, url string, r Range) (io
 	}
 
 	return resp.Body, nil
+}
+
+// SetHTTPClient allows customizing the HTTP client.
+func (d *Downloader) SetHTTPClient(client *http.Client) {
+	d.client = client
 }
 
 // splitRanges splits the file into byte ranges based on chunkSize.

@@ -4,6 +4,7 @@ go 1.25.8
 
 require (
 	github.com/aliyun/alibabacloud-oss-go-sdk-v2 v1.4.0
+	github.com/aliyun/fc-runtime-go-sdk v0.3.1
 	github.com/joho/godotenv v1.5.1
 )
 

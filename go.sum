@@ -1,5 +1,7 @@
 github.com/aliyun/alibabacloud-oss-go-sdk-v2 v1.4.0 h1:gfxyMc5g9TJ4TO/PQ8PvkGfYpDUHZnVGP0/7iTgI0Ks=
 github.com/aliyun/alibabacloud-oss-go-sdk-v2 v1.4.0/go.mod h1:FTzydeQVmR24FI0D6XWUOMKckjXehM/jgMn1xC+DA9M=
+github.com/aliyun/fc-runtime-go-sdk v0.3.1 h1:Qhd4W5DLxfhOcHeMzxAH/gxb65mvl4cYW81UPPaOoKU=
+github.com/aliyun/fc-runtime-go-sdk v0.3.1/go.mod h1:OpZ+rlKxC4iGgigPCMzObgADLyrI7HxdaVs5H7uhy3M=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/joho/godotenv v1.5.1 h1:7eLL/+HRGLY0ldzfGMeQkb7vMd0as4CfYvUVzLqw0N0=

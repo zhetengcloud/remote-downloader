@@ -51,26 +51,16 @@ func TestOSS_FullFlow(t *testing.T) {
 
 	d := httpget.NewDownloader()
 	poolSize := 2
-	chunkSize := int64(10 * 1024 * 1024) // 1MB chunks for testing
+	chunkSize := int64(1024 * 1024) // 1MB chunks for testing
 
-	results, err := d.RangeDownload(ctx, testURL, poolSize, chunkSize)
+	// RangeDownload now returns storage.RangeInfo directly!
+	rangeCh, err := d.RangeDownload(ctx, testURL, poolSize, chunkSize)
 	if err != nil {
+		_ = store.AbortMultipartUpload(ctx, uploadID, objectKey)
 		t.Fatalf("RangeDownload failed: %v", err)
 	}
 
-	// Adapter: convert httpget.Result to storage.RangeInfo
-	rangeCh := make(chan storage.RangeInfo, poolSize)
-	go func() {
-		defer close(rangeCh)
-		for r := range results {
-			if r.Error != nil {
-				continue
-			}
-			rangeCh <- storage.SimpleRangeInfo{Num: r.PartNum, Data: r.Data}
-		}
-	}()
-
-	parts, err := store.Upload(ctx, objectKey, uploadID, rangeCh, 2)
+	parts, err := store.Upload(ctx, objectKey, uploadID, rangeCh, poolSize)
 	if err != nil {
 		_ = store.AbortMultipartUpload(ctx, uploadID, objectKey)
 		t.Fatalf("Upload failed: %v", err)

@@ -40,15 +40,3 @@ type RangeInfo interface {
 	PartNumber() int
 	Body() io.ReadCloser
 }
-
-// SimpleRangeInfo is a simple implementation of RangeInfo.
-type SimpleRangeInfo struct {
-	Num  int
-	Data io.ReadCloser
-}
-
-// PartNumber returns the part number.
-func (s SimpleRangeInfo) PartNumber() int { return s.Num }
-
-// Body returns the body.
-func (s SimpleRangeInfo) Body() io.ReadCloser { return s.Data }

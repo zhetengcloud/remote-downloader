@@ -28,13 +28,14 @@ type Config struct {
 	AccessKeyID     string
 	AccessKeySecret string
 	Bucket          string
+	SecurityToken   string
 }
 
 // New creates a new OSS storage with SDK v2.
 func New(cfg Config, progressCh chan<- storage.Progress) (*OSS, error) {
 	var creds credentials.CredentialsProvider
 	if cfg.AccessKeyID != "" && cfg.AccessKeySecret != "" {
-		creds = credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.AccessKeySecret, "")
+		creds = credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.AccessKeySecret, cfg.SecurityToken)
 	} else {
 		// Try environment variables
 		creds = credentials.NewEnvironmentVariableCredentialsProvider()
