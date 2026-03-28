@@ -1,3 +1,4 @@
+// Package storage
 package storage
 
 import (
@@ -11,15 +12,11 @@ type Storage interface {
 	// CreateMultipartUpload initiates a multipart upload and returns an upload ID.
 	CreateMultipartUpload(ctx context.Context, objectKey string) (uploadID string, err error)
 
-	// UploadPart uploads a single part. partNumber starts from 1.
-	// Returns ETag (or equivalent part identifier) for completing the upload.
-	UploadPart(ctx context.Context, uploadID string, partNumber int, content io.Reader) (etag string, err error)
-
 	// CompleteMultipartUpload finalizes the multipart upload with all parts.
-	CompleteMultipartUpload(ctx context.Context, uploadID string, parts []PartInfo) error
+	CompleteMultipartUpload(ctx context.Context, uploadID string, objectKey string, parts []PartInfo) error
 
 	// AbortMultipartUpload cancels and cleans up the multipart upload on failure.
-	AbortMultipartUpload(ctx context.Context, uploadID string) error
+	AbortMultipartUpload(ctx context.Context, uploadID string, objectKey string) error
 }
 
 // PartInfo represents a successfully uploaded part for completing multipart upload.
@@ -27,3 +24,31 @@ type PartInfo struct {
 	PartNumber int
 	ETag       string
 }
+
+// Progress represents the upload progress.
+type Progress struct {
+	ObjectKey  string // object key being uploaded
+	UploadID   string // upload ID for multipart upload (optional)
+	PartNumber int    // current part being uploaded (0 if not applicable)
+	Uploaded   int64  // bytes uploaded so far
+	Status     string // "uploading" | "completed" | "aborted" | "failed"
+}
+
+// RangeInfo represents a part to be uploaded.
+// Implementations: convert httpget.Result or create custom sources.
+type RangeInfo interface {
+	PartNumber() int
+	Body() io.ReadCloser
+}
+
+// SimpleRangeInfo is a simple implementation of RangeInfo.
+type SimpleRangeInfo struct {
+	Num  int
+	Data io.ReadCloser
+}
+
+// PartNumber returns the part number.
+func (s SimpleRangeInfo) PartNumber() int { return s.Num }
+
+// Body returns the body.
+func (s SimpleRangeInfo) Body() io.ReadCloser { return s.Data }

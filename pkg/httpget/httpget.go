@@ -36,7 +36,14 @@ type Result struct {
 	Error   error
 }
 
-// Downloader downloads files via HTTP byte-range requests.
+func (res *Result) PartNumber() int {
+	return res.PartNum
+}
+
+func (res *Result) Body() io.ReadCloser {
+	return res.Data
+}
+
 type Downloader struct {
 	client *http.Client
 }

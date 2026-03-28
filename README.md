@@ -1,96 +1,150 @@
 # remote-downloader
 
-Download files via HTTP byte-range requests.
+Download files via HTTP byte-range requests and upload to cloud storage.
 
 ## Design
 
-Simple, focused HTTP downloader with byte-range support:
+Decoupled architecture: `httpget` downloads, `storage` uploads, caller coordinates.
 
 ```
-┌─────────────────────────────────────────┐
-│        httpget.Downloader              │
-│                                        │
-│  RangeDownload(url, poolSize, chunkSize)
-│       ↓                                │
-│  [HEAD] → get file size                │
-│  [Split] → ranges                      │
-│  [Workers] → concurrent GET ranges     │
-│       ↓                                │
-│  <-chan Result {Range, PartNum, Data}  │
-└─────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                        Caller                                │
+│  ┌─────────────┐         ┌─────────────┐                   │
+│  │  httpget    │  chan   │   storage   │                   │
+│  │  Download   │ ───────▶│   Upload    │                   │
+│  └─────────────┘         └─────────────┘                   │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-## Usage
+## httpget
+
+HTTP byte-range downloader.
 
 ```go
+import "go.zheteng.cloud/downloader/pkg/httpget"
+
 d := httpget.NewDownloader()
 
-// Download with 5 concurrent workers, 5MB chunks
-results, err := d.RangeDownload(ctx, "https://example.com/file.zip", 5, 5*1024*1024)
-if err != nil {
-    log.Fatal(err)
-}
+// Get file size
+size, _ := d.GetFileSize(ctx, url)
+
+// Download with 5 workers, 5MB chunks
+results, _ := d.RangeDownload(ctx, url, 5, 5*1024*1024)
 
 for result := range results {
     if result.Error != nil {
-        log.Printf("part %d failed: %v\n", result.PartNum, result.Error)
         continue
     }
-    
-    // Use result.Data (must close)
-    data, err := io.ReadAll(result.Data)
-    _ = result.Data.Close()
-    
-    log.Printf("part %d: range [%d-%d], size %d\n",
-        result.PartNum, result.Range.Start, result.Range.End, len(data))
+    // Use result.PartNum, result.Data
 }
 ```
 
-## API
+## storage
 
-### Downloader
+Storage interface and implementations.
 
-```go
-type Downloader struct{}
-
-func NewDownloader() *Downloader
-func (d *Downloader) GetFileSize(ctx context.Context, url string) (int64, error)
-func (d *Downloader) RangeDownload(ctx context.Context, url string, poolSize int, chunkSize int64) (<-chan Result, error)
-func (d *Downloader) Download(ctx context.Context, url string) (io.ReadCloser, error)
-```
-
-### Types
-
-```go
-type Range struct {
-    Start int64
-    End   int64
-}
-
-type Result struct {
-    Range   Range
-    PartNum int           // 1-based part number
-    Data    io.ReadCloser // must be closed by consumer
-    Error   error
-}
-```
-
-## Storage (separate package)
-
-Storage interface is separate and independent:
+### Interface
 
 ```go
 package storage
 
 type Storage interface {
     CreateMultipartUpload(ctx context.Context, objectKey string) (uploadID string, err error)
-    UploadPart(ctx context.Context, uploadID string, partNumber int, content io.Reader) (etag string, err error)
-    CompleteMultipartUpload(ctx context.Context, uploadID string, parts []PartInfo) error
-    AbortMultipartUpload(ctx context.Context, uploadID string) error
+    CompleteMultipartUpload(ctx context.Context, uploadID string, objectKey string, parts []PartInfo) error
+    AbortMultipartUpload(ctx context.Context, uploadID string, objectKey string) error
+}
+
+type RangeInfo interface {
+    PartNumber() int
+    Body() io.ReadCloser
 }
 ```
 
-The caller is responsible for coordinating download results with storage uploads.
+### OSS Implementation
+
+```go
+import "go.zheteng.cloud/downloader/pkg/storage/oss"
+
+cfg := oss.Config{
+    Region:          "cn-hangzhou",
+    AccessKeyID:     "key",
+    AccessKeySecret: "secret",
+    Bucket:          "bucket",
+}
+
+store, _ := oss.New(cfg, progressCh)
+
+// Create multipart upload
+uploadID, _ := store.CreateMultipartUpload(ctx, objectKey)
+
+// Upload from channel with 5 workers
+parts, _ := store.Upload(ctx, objectKey, uploadID, rangeCh, 5)
+
+// Complete
+store.CompleteMultipartUpload(ctx, uploadID, objectKey, parts)
+```
+
+## Usage Example
+
+```go
+package main
+
+import (
+    "context"
+    "io"
+    "go.zheteng.cloud/downloader/pkg/httpget"
+    "go.zheteng.cloud/downloader/pkg/storage"
+    "go.zheteng.cloud/downloader/pkg/storage/oss"
+)
+
+// Adapter: httpget.Result -> storage.RangeInfo
+type resultAdapter struct {
+    r httpget.Result
+}
+
+func (a resultAdapter) PartNumber() int       { return a.r.PartNum }
+func (a resultAdapter) Body() io.ReadCloser   { return a.r.Data }
+
+func main() {
+    ctx := context.Background()
+    
+    // 1. Create downloader
+    d := httpget.NewDownloader()
+    
+    // 2. Create OSS storage
+    store, _ := oss.New(oss.Config{
+        Region: "cn-hangzhou",
+        // ... credentials
+    }, nil)
+    
+    // 3. Create multipart upload
+    uploadID, _ := store.CreateMultipartUpload(ctx, "file.zip")
+    
+    // 4. Download and bridge to upload channel
+    results, _ := d.RangeDownload(ctx, "https://example.com/file.zip", 5, 5*1024*1024)
+    
+    rangeCh := make(chan storage.RangeInfo, 10)
+    go func() {
+        defer close(rangeCh)
+        for r := range results {
+            if r.Error != nil {
+                continue
+            }
+            rangeCh <- resultAdapter{r}
+        }
+    }()
+    
+    // 5. Upload
+    parts, err := store.Upload(ctx, "file.zip", uploadID, rangeCh, 5)
+    if err != nil {
+        store.AbortMultipartUpload(ctx, uploadID, "file.zip")
+        return
+    }
+    
+    // 6. Complete
+    store.CompleteMultipartUpload(ctx, uploadID, "file.zip", parts)
+}
+```
 
 ## File Structure
 
@@ -98,16 +152,20 @@ The caller is responsible for coordinating download results with storage uploads
 .
 ├── pkg/
 │   ├── httpget/         # HTTP download only
-│   │   └── httpget.go
-│   └── storage/         # Storage interface
-│       └── storage.go
+│   │   ├── httpget.go
+│   │   └── httpget_test.go
+│   └── storage/         # Storage interface and implementations
+│       ├── storage.go
+│       └── oss/         # Aliyun OSS v2 implementation
+│           ├── oss.go
+│           └── oss_test.go
 ├── go.mod
 └── README.md
 ```
 
 ## Design Principles
 
-- **Single Responsibility**: `httpget` only downloads, `storage` only uploads
-- **No coupling**: Download doesn't know about storage
-- **Caller controls**: Caller decides what to do with downloaded data
-- **Simple API**: One method for range download, returns channel of results
+1. **No coupling**: `httpget` doesn't know about `storage`, `storage` doesn't know about `httpget`
+2. **Interface-based**: `storage.RangeInfo` is the bridge between them
+3. **Caller controls**: Caller creates channel, adapts types, coordinates flow
+4. **Concurrent uploads**: `OSS.Upload()` accepts poolSize for concurrent part uploads

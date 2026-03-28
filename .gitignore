@@ -24,4 +24,8 @@ go.work.sum
 
 # env file
 .env
+.env.local
+
+# Package-specific env files
+pkg/storage/oss/.env.test.local
 
